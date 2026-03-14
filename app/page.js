@@ -1,66 +1,81 @@
-import Image from "next/image";
-import styles from "./page.module.css";
+'use client'
+import { useState } from 'react'
 
 export default function Home() {
+  const [form, setForm] = useState({
+    email: '',
+    job_title: '',
+    country: '',
+    city: '',
+    mode: 'remote',
+  })
+  const [msg, setMsg] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function send() {
+    setSaving(true); setMsg('')
+    try {
+      const res = await fetch('/api/save-alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form)
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data?.error || 'Error al guardar')
+      setMsg('✅ Alerta guardada correctamente')
+    } catch (e) {
+      setMsg(`❌ ${e.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const input = { display: 'block', marginBottom: 10, padding: 8, width: 320 }
+
   return (
-    <div className={styles.page}>
-      <main className={styles.main}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className={styles.intro}>
-          <h1>To get started, edit the page.js file.</h1>
-          <p>
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className={styles.ctas}>
-          <a
-            className={styles.primary}
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className={styles.logo}
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className={styles.secondary}
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div style={{ padding: 32, fontFamily: 'sans-serif' }}>
+      <h1>Crear alerta de empleo</h1>
+      <input
+        style={input}
+        placeholder="Email"
+        value={form.email}
+        onChange={e => setForm({ ...form, email: e.target.value })}
+      />
+      <input
+        style={input}
+        placeholder="Puesto (job_title)"
+        value={form.job_title}
+        onChange={e => setForm({ ...form, job_title: e.target.value })}
+      />
+      <input
+        style={input}
+        placeholder="País (country)"
+        value={form.country}
+        onChange={e => setForm({ ...form, country: e.target.value })}
+      />
+      <input
+        style={input}
+        placeholder="Ciudad (city)"
+        value={form.city}
+        onChange={e => setForm({ ...form, city: e.target.value })}
+      />
+
+      <label style={{ display:'block', marginTop: 6, marginBottom: 6 }}>Modalidad</label>
+      <select
+        style={{ ...input, width: 336 }}
+        value={form.mode}
+        onChange={e => setForm({ ...form, mode: e.target.value })}
+      >
+        <option value="remote">Teletrabajo</option>
+        <option value="onsite">Presencial</option>
+        <option value="hybrid">Híbrido</option>
+      </select>
+
+      <button disabled={saving} onClick={send} style={{ padding: '8px 16px' }}>
+        {saving ? 'Guardando…' : 'Guardar alerta'}
+      </button>
+
+      {msg && <p style={{ marginTop: 10 }}>{msg}</p>}
     </div>
-  );
+  )
 }
