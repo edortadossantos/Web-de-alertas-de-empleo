@@ -12,9 +12,7 @@ import nodemailer from 'nodemailer'
 // =======================
 const MAX_PAGES_ENV   = Number(process.env.ADZUNA_MAX_PAGES || 0)              // 0 = sin tope
 const MAX_RESULTS_ENV = Number(process.env.ADZUNA_MAX_RESULTS_PER_ALERT || 0)  // 0 = sin tope
-
-// Para evitar que Gmail recorte el cuerpo del mensaje, troceo opcional:
-const CHUNK_SIZE = Number(process.env.EMAIL_CHUNK_SIZE || 100) // 100 enlaces por email (ajusta a tu gusto)
+const CHUNK_SIZE      = Number(process.env.EMAIL_CHUNK_SIZE || 100)            // troceo de emails
 
 // ========= Utilidades =========
 const CITY_FIX = {
@@ -166,15 +164,25 @@ export async function GET() {
   if (missing.length) return Response.json({ error: `Faltan variables: ${missing.join(', ')}` }, { status: 500 })
 
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+
+  // 1) Cargar alertas
   const { data: alerts, error: alertsError } = await supabase.from('alerts').select('*')
   if (alertsError) return Response.json({ error: alertsError.message }, { status: 500 })
+
+  // 2) Cargar emails muteados y construir Set para filtrarlos
+  const { data: mutedRows, error: mutedErr } = await supabase.from('muted_emails').select('email')
+  if (mutedErr) return Response.json({ error: mutedErr.message }, { status: 500 })
+  const mutedSet = new Set((mutedRows || []).map(r => String(r.email || '').toLowerCase()))
+
+  // 3) Filtrar alertas por emails NO muteados
+  const effectiveAlerts = (alerts || []).filter(a => !mutedSet.has(String(a.email || '').toLowerCase()))
 
   const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL, pass: process.env.EMAIL_PASS } })
 
   let totalNew = 0
   const resultsByUser = {}
 
-  for (const alert of alerts || []) {
+  for (const alert of effectiveAlerts) {
     try {
       const [adz, ind] = await Promise.all([ fetchAdzunaOffers(alert), fetchIndeedOffers(alert) ])
       console.log(`Adzuna devolvió ${adz.length} | Indeed devolvió ${ind.length} para`, alert)
@@ -186,12 +194,10 @@ export async function GET() {
       for (const job of merged) {
         if (!job?.link) continue
 
+        // DEDUPE por (job_id, sent_to)
         const { data: already, error: alreadyErr } = await supabase
-          .from('jobs-sent')  // o jobs_sent
-          .select('job_id')
-          .eq('job_id', job.link)
-          .eq('sent_to', alert.email)
-          .maybeSingle()
+          .from('jobs-sent')  // o jobs_sent si renombraste
+          .select('job_id').eq('job_id', job.link).eq('sent_to', alert.email).maybeSingle()
 
         if (alreadyErr) { console.error('supabase check error', alreadyErr.message); continue }
         if (already) continue
@@ -211,12 +217,11 @@ export async function GET() {
     }
   }
 
-  // ===== Envío: todas las nuevas, troceadas en varios emails si hay muchísimas =====
+  // 4) Enviar correos (troceo si hay muchos)
   for (const [email, jobs] of Object.entries(resultsByUser)) {
     if (!jobs?.length) continue
 
     if (!isFinite(CHUNK_SIZE) || CHUNK_SIZE <= 0) {
-      // un solo email con todo
       const lines = jobs.map(j => `• ${j.title} — ${j.company || ''} (${j.location || ''})\n  ${j.link}`).join('\n\n')
       try {
         await transporter.sendMail({
@@ -227,7 +232,6 @@ export async function GET() {
         })
       } catch (e) { console.error('email error', e.message) }
     } else {
-      // troceo en bloques de CHUNK_SIZE
       for (let i = 0; i < jobs.length; i += CHUNK_SIZE) {
         const chunk = jobs.slice(i, i + CHUNK_SIZE)
         const lines = chunk.map(j => `• ${j.title} — ${j.company || ''} (${j.location || ''})\n  ${j.link}`).join('\n\n')
@@ -248,3 +252,4 @@ export async function GET() {
   if (!Object.keys(resultsByUser).length) console.log('No hay novedades para enviar (dedupe/filtrado dejó 0)')
   return Response.json({ ok: true, alerts: alerts?.length || 0, newSent: totalNew })
 }
+
