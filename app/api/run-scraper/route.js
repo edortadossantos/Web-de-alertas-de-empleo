@@ -158,7 +158,16 @@ async function fetchIndeedOffers(alert) {
 }
 
 // ========= Handler =========
-export async function GET() {
+export async function GET(request) {
+  // Protección por token: se requiere header Authorization: Bearer <CRON_SECRET>
+  const cronSecret = process.env.CRON_SECRET
+  if (cronSecret) {
+    const authHeader = request.headers.get('authorization')
+    if (authHeader !== `Bearer ${cronSecret}`) {
+      return Response.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+  }
+
   const required = ['SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','EMAIL','EMAIL_PASS','ADZUNA_APP_ID','ADZUNA_APP_KEY']
   const missing = required.filter(k => !process.env[k])
   if (missing.length) return Response.json({ error: `Faltan variables: ${missing.join(', ')}` }, { status: 500 })
