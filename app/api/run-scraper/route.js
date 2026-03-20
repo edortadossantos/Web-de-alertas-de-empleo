@@ -9,8 +9,6 @@ const MAX_PAGES_ENV   = Number(process.env.ADZUNA_MAX_PAGES || 0)
 const MAX_RESULTS_ENV = Number(process.env.ADZUNA_MAX_RESULTS_PER_ALERT || 0)
 const CHUNK_SIZE      = Number(process.env.EMAIL_CHUNK_SIZE || 100)
 
-// ─── Limpieza de localización ─────────────────────────────────────────────
-// Acepta ciudad O provincia (ej: "Bilbao", "Bizkaia", "País Vasco")
 function cleanLocation(raw = '') {
   let s = String(raw || '').trim()
   s = s.replace(/,?\s*españa\s*$/i, '').replace(/,?\s*spain\s*$/i, '')
@@ -23,7 +21,6 @@ const normalizeIndeed = (job, domain) => {
   return { title: job.title || '', link, company: job.company || '', location: job.location || '', snippet: job.snippet || '', salary_min: null, salary_max: null }
 }
 
-// ─── Filtro de relevancia ─────────────────────────────────────────────────
 const STOPWORDS = new Set(['de','la','el','en','y','a','con','para','por','del','los','las','un','una','al'])
 
 function isRelevant(jobTitle, searchedTitle) {
@@ -33,31 +30,94 @@ function isRelevant(jobTitle, searchedTitle) {
     .replace(/[^a-z0-9\s]/g, '')
     .split(/\s+/)
     .filter(w => w.length > 2 && !STOPWORDS.has(w))
-
   const searchWords = normalize(searchedTitle)
   const titleWords  = normalize(jobTitle)
   if (searchWords.length === 0) return true
   return searchWords.some(sw => titleWords.some(tw => tw.includes(sw) || sw.includes(tw)))
 }
 
-// ─── Filtro de modalidad (soporta string o array) ─────────────────────────
 function matchesMode(modes, jobText) {
   const modesArr = Array.isArray(modes)
     ? modes.map(m => m.toLowerCase())
     : [String(modes || '').toLowerCase()]
-
   if (modesArr.length === 0 || modesArr.every(m => !['remote','onsite','hybrid'].includes(m))) return true
-
   const s = (jobText || '').toLowerCase()
   const isRemote = s.includes('remote') || s.includes('teletrab') || s.includes('remoto')
   const isHybrid = s.includes('hybrid') || s.includes('híbrido') || s.includes('hibrido')
-
   return modesArr.some(mode => {
     if (mode === 'remote') return isRemote
     if (mode === 'hybrid') return isHybrid
     if (mode === 'onsite') return !isRemote && !isHybrid
     return true
   })
+}
+
+// ─── Template HTML ────────────────────────────────────────────────────────
+function buildEmailHtml(jobs, totalJobs) {
+  const jobCards = jobs.map(j => {
+    const salary = (j.salary_min || j.salary_max)
+      ? `<div style="margin-top:6px;">
+           <span style="display:inline-block;background:#f0eeff;color:#6c63ff;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600;">
+             💰 ${j.salary_min ? j.salary_min.toLocaleString('es-ES') + '€' : ''}${j.salary_max ? ' – ' + j.salary_max.toLocaleString('es-ES') + '€' : ''}
+           </span>
+         </div>`
+      : ''
+    const company  = j.company  ? `<div style="color:#666;font-size:13px;margin-top:4px;">🏢 ${j.company}</div>`  : ''
+    const location = j.location ? `<div style="color:#666;font-size:13px;margin-top:2px;">📍 ${j.location}</div>` : ''
+
+    return `
+      <div style="background:#fff;border:1px solid #e8e8f0;border-radius:12px;padding:20px;margin-bottom:12px;">
+        <div style="font-size:16px;font-weight:700;color:#1a1a2e;line-height:1.3;">${j.title}</div>
+        ${company}${location}${salary}
+        <div style="margin-top:14px;">
+          <a href="${j.link}" target="_blank"
+             style="display:inline-block;background:#6c63ff;color:#fff;text-decoration:none;padding:9px 20px;border-radius:8px;font-size:13px;font-weight:600;">
+            Ver oferta →
+          </a>
+        </div>
+      </div>`
+  }).join('')
+
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://web-de-alertas-de-empleo.vercel.app'
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f4f4f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f8;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:580px;">
+
+        <tr><td style="background:linear-gradient(135deg,#6c63ff,#8b7fff);border-radius:16px 16px 0 0;padding:32px;text-align:center;">
+          <div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.5px;">🎯 Alertas de Empleo</div>
+          <div style="color:rgba(255,255,255,0.85);font-size:14px;margin-top:6px;">
+            Hemos encontrado <strong>${totalJobs} oferta${totalJobs !== 1 ? 's' : ''} nueva${totalJobs !== 1 ? 's' : ''}</strong> que encajan con tu alerta
+          </div>
+        </td></tr>
+
+        <tr><td style="padding:20px 0;">${jobCards}</td></tr>
+
+        <tr><td style="background:#fff;border:1px solid #e8e8f0;border-radius:12px;padding:20px;text-align:center;">
+          <div style="color:#999;font-size:12px;line-height:1.6;">
+            Recibes este email porque tienes una alerta activa en <strong>Alertas de Empleo</strong>.<br>
+            ¿Ya no quieres recibirlos? <a href="${baseUrl}" style="color:#6c63ff;text-decoration:none;">Gestiona tus alertas aquí</a>.
+          </div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`
+}
+
+function buildEmailText(jobs) {
+  return jobs.map(j => {
+    const salary = (j.salary_min || j.salary_max)
+      ? ` | 💰 ${j.salary_min ? j.salary_min.toLocaleString('es-ES') + '€' : ''}${j.salary_max ? ' – ' + j.salary_max.toLocaleString('es-ES') + '€' : ''}`
+      : ''
+    return `• ${j.title} — ${j.company || ''} (${j.location || ''})${salary}\n  ${j.link}`
+  }).join('\n\n')
 }
 
 // ─── Adzuna ───────────────────────────────────────────────────────────────
@@ -76,11 +136,9 @@ async function fetchAdzunaOffers(alert) {
       app_id:  process.env.ADZUNA_APP_ID,
       app_key: process.env.ADZUNA_APP_KEY,
       results_per_page: '20',
-      what: WHAT,
-      where: WHERE,
+      what: WHAT, where: WHERE,
       'content-type': 'application/json'
     })
-
     if (alert.salary_min) params.set('salary_min', String(alert.salary_min))
 
     try {
@@ -196,7 +254,6 @@ export async function GET(request) {
         if (!matchesMode(alert.mode, `${j.title} ${j.snippet} ${j.location}`)) return false
         return true
       })
-
       console.log(`Tras filtros quedan ${merged.length}`)
 
       for (const job of merged) {
@@ -234,23 +291,19 @@ export async function GET(request) {
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]
-      const lines = chunk.map(j => {
-        const salaryInfo = (j.salary_min || j.salary_max)
-          ? ` | 💰 ${j.salary_min ? j.salary_min.toLocaleString('es-ES') + '€' : ''}${j.salary_max ? ' – ' + j.salary_max.toLocaleString('es-ES') + '€' : ''}`
-          : ''
-        return `• ${j.title} — ${j.company || ''} (${j.location || ''})${salaryInfo}\n  ${j.link}`
-      }).join('\n\n')
-
       const subject = chunks.length > 1
-        ? `Nuevas ofertas (${chunk.length}/${jobs.length}) [parte ${i + 1}/${chunks.length}]`
-        : `Nuevas ofertas (${jobs.length}) para tu alerta`
+        ? `🎯 Nuevas ofertas (${chunk.length}/${jobs.length}) [parte ${i + 1}/${chunks.length}]`
+        : `🎯 ${jobs.length} oferta${jobs.length !== 1 ? 's' : ''} nueva${jobs.length !== 1 ? 's' : ''} para ti`
 
       try {
         await transporter.sendMail({
           from: `"Alertas de Empleo" <${process.env.EMAIL}>`,
-          to: email, subject,
-          text: `Hola,\n\nHemos encontrado ${jobs.length} oferta(s) nueva(s) que encajan con tu alerta.\n\n${lines}\n\n— Alertas de Empleo`
+          to: email,
+          subject,
+          html: buildEmailHtml(chunk, jobs.length),
+          text: buildEmailText(chunk)
         })
+        console.log(`[email] Enviado a ${email} con ${chunk.length} ofertas`)
       } catch (e) { console.error('email error', e.message) }
     }
   }
