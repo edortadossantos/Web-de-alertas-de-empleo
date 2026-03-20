@@ -2,6 +2,7 @@ export const runtime = 'nodejs'
 
 import { createClient } from '@supabase/supabase-js'
 import dns from 'dns/promises'
+import { runScraper } from '../scraper/logic.js'
 
 // ─── Validación de email ───────────────────────────────────────────────────
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -21,14 +22,9 @@ function sanitizeAlert(body) {
   const out = {}
   out.email     = String(body.email || '').trim().toLowerCase()
   out.job_title = String(body.job_title || '').trim()
+  out.city      = String(body.city || '').trim().replace(/\s{2,}/g, ' ')
+  out.country   = String(body.country || '').trim()
 
-  // location acepta ciudad O provincia — solo limpiamos espacios extra
-  const rawLocation = String(body.city || '').trim()
-  out.city = rawLocation.replace(/\s{2,}/g, ' ').trim()
-
-  out.country = String(body.country || '').trim()
-
-  // mode puede ser array ['onsite','remote'] o string legacy
   const rawMode = body.mode
   if (Array.isArray(rawMode)) {
     const valid = rawMode.map(m => String(m).toLowerCase().trim()).filter(m => ['remote','onsite','hybrid'].includes(m))
@@ -38,9 +34,7 @@ function sanitizeAlert(body) {
     out.mode = ['remote','onsite','hybrid'].includes(m) ? [m] : ['onsite']
   }
 
-  // salary_min opcional
   out.salary_min = body.salary_min ? Number(body.salary_min) : null
-
   return out
 }
 
@@ -57,7 +51,7 @@ async function checkRateLimit(supabase, ip) {
     .gte('created_at', windowStart)
 
   if (error) {
-    console.warn('[rate-limit] Error consultando rate_limit_log:', error.message)
+    console.warn('[rate-limit] Error:', error.message)
     return { allowed: true }
   }
   if (count >= RATE_LIMIT_MAX) return { allowed: false }
@@ -82,10 +76,7 @@ export async function POST(request) {
     // 1) Rate limiting
     const { allowed } = await checkRateLimit(supabase, ip)
     if (!allowed) {
-      return Response.json(
-        { error: 'Demasiadas solicitudes. Inténtalo más tarde.' },
-        { status: 429 }
-      )
+      return Response.json({ error: 'Demasiadas solicitudes. Inténtalo más tarde.' }, { status: 429 })
     }
 
     // 2) Parsear y sanitizar
@@ -122,23 +113,18 @@ export async function POST(request) {
       .eq('email', data.email)
 
     if (alertCount >= 10) {
-      return Response.json(
-        { error: 'Has alcanzado el límite de alertas por email (máx. 10).' },
-        { status: 400 }
-      )
+      return Response.json({ error: 'Has alcanzado el límite de alertas por email (máx. 10).' }, { status: 400 })
     }
 
     // 7) Guardar alerta
     const { data: ins, error } = await supabase.from('alerts').insert([data]).select()
     if (error) return Response.json({ error: error.message }, { status: 400 })
 
-    // 8) Trigger inmediato del scraper (sin await)
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://web-de-alertas-de-empleo.vercel.app'
-    fetch(`${baseUrl}/api/run-scraper?email=${encodeURIComponent(data.email)}`, {
-      headers: {
-        ...(process.env.CRON_SECRET ? { Authorization: `Bearer ${process.env.CRON_SECRET}` } : {})
-      }
-    }).catch(err => console.error('[save-alert] trigger scraper error:', err.message))
+    // 8) Trigger inmediato — llamada directa sin HTTP fetch
+    // Se ejecuta en segundo plano sin bloquear la respuesta al usuario
+    runScraper(data.email).catch(err =>
+      console.error('[save-alert] scraper error:', err.message)
+    )
 
     return Response.json({ success: true, data: ins }, { status: 201 })
   } catch (err) {
