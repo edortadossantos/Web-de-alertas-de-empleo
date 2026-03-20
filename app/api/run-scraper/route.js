@@ -1,4 +1,3 @@
-// Fuerza runtime Node para poder usar nodemailer en Next.js 16
 export const runtime = 'nodejs'
 
 import { createClient } from '@supabase/supabase-js'
@@ -6,14 +5,10 @@ import axios from 'axios'
 import * as cheerio from 'cheerio'
 import nodemailer from 'nodemailer'
 
-// =======================
-// Parámetros opcionales por ENV (límite defensivo)
-// =======================
 const MAX_PAGES_ENV   = Number(process.env.ADZUNA_MAX_PAGES || 0)
 const MAX_RESULTS_ENV = Number(process.env.ADZUNA_MAX_RESULTS_PER_ALERT || 0)
 const CHUNK_SIZE      = Number(process.env.EMAIL_CHUNK_SIZE || 100)
 
-// ========= Utilidades =========
 const CITY_FIX = {
   'barceloma': 'barcelona',
   'bilbao españa': 'bilbao',
@@ -23,7 +18,7 @@ const CITY_FIX = {
   'spain': ''
 }
 
-function cleanCity(rawCity = '', rawCountry = '') {
+function cleanCity(rawCity = '') {
   let s = String(rawCity || '').toLowerCase().trim()
   s = s.replace(/\s+españa\b/g, '').replace(/\s+spain\b/g, '')
   if (CITY_FIX[s]) s = CITY_FIX[s]
@@ -37,95 +32,76 @@ const normalizeIndeed = (job, domain) => {
   return { title: job.title || '', link, company: job.company || '', location: job.location || '', snippet: job.snippet || '' }
 }
 
-const matchesMode = (mode, jobText, apiTeleworking) => {
+const matchesMode = (mode, jobText) => {
   const s = (jobText || '').toLowerCase()
   const isRemote = s.includes('remote') || s.includes('teletrab') || s.includes('remoto')
   const isHybrid = s.includes('hybrid') || s.includes('híbrido') || s.includes('hibrido')
-
-  if (apiTeleworking) {
-    const t = apiTeleworking.toLowerCase()
-    if (mode === 'remote') return ['remote','teletrab','remoto','home'].some(x => t.includes(x))
-    if (mode === 'hybrid') return t.includes('hybrid') || t.includes('híbrido') || t.includes('hibrido')
-    if (mode === 'onsite') return t.includes('office') || t.includes('presencial')
-  }
   if (mode === 'remote') return isRemote
   if (mode === 'hybrid') return isHybrid || (isRemote && s.includes('híbrido'))
   if (mode === 'onsite') return !isRemote
   return true
 }
 
-// ========= Adzuna =========
 async function fetchAdzunaOffers(alert) {
   const WHAT  = encodeURIComponent(String(alert.job_title || '').trim())
-  const CITY  = cleanCity(alert.city, alert.country)
-  const WHERE = encodeURIComponent(CITY)
+  const WHERE = encodeURIComponent(cleanCity(alert.city))
   const base  = `https://api.adzuna.com/v1/api/jobs/es/search`
-
-  const all = []
-  let page = 1
+  const all   = []
+  let page    = 1
 
   while (true) {
-    if (MAX_PAGES_ENV > 0 && page > MAX_PAGES_ENV) { console.warn(`[Adzuna] Parado por ADZUNA_MAX_PAGES=${MAX_PAGES_ENV}`); break }
-    if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) { console.warn(`[Adzuna] Parado por ADZUNA_MAX_RESULTS_PER_ALERT=${MAX_RESULTS_ENV}`); break }
+    if (MAX_PAGES_ENV > 0 && page > MAX_PAGES_ENV) break
+    if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) break
 
     const params = new URLSearchParams({
       app_id:  process.env.ADZUNA_APP_ID,
       app_key: process.env.ADZUNA_APP_KEY,
       results_per_page: '20',
-      what: WHAT,
-      where: WHERE,
+      what: WHAT, where: WHERE,
       'content-type': 'application/json'
     })
-    const url = `${base}/${page}?${params.toString()}`
 
     try {
-      const { data } = await axios.get(url, { headers: { 'Accept': 'application/json' }, timeout: 20000 })
+      const { data } = await axios.get(`${base}/${page}?${params}`, {
+        headers: { Accept: 'application/json' }, timeout: 20000
+      })
       const results = data?.results || []
-      console.log(`[Adzuna] page=${page} what="${decodeURIComponent(WHAT)}" where="${decodeURIComponent(WHERE)}" -> ${results.length} resultados`)
       if (results.length === 0) break
-
-      const batch = results.map(r => ({
+      all.push(...results.map(r => ({
         title:    r?.title || '',
         link:     r?.redirect_url || '',
         company:  r?.company?.display_name || '',
         location: r?.location?.display_name || '',
         snippet:  (r?.description || '').slice(0, 300)
-      }))
-      all.push(...batch)
-
-      if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) { console.warn(`[Adzuna] Parado tras page=${page}`); break }
-      page += 1
+      })))
+      if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) break
+      page++
     } catch (e) {
-      console.warn('[Adzuna] error', { url, status: e?.response?.status, msg: e?.message })
+      console.warn('[Adzuna] error', e?.response?.status, e?.message)
       break
     }
   }
-
   return all
 }
 
-// ========= Indeed =========
 async function fetchIndeedOffers(alert) {
-  const q = encodeURIComponent(String(alert.job_title || '').trim())
-  const cityOnly = cleanCity(alert.city, alert.country)
-  const l = encodeURIComponent(cityOnly)
+  const q      = encodeURIComponent(String(alert.job_title || '').trim())
+  const l      = encodeURIComponent(cleanCity(alert.city))
   const domain = 'https://www.indeed.es'
-  const url = `${domain}/jobs?q=${q}&l=${l}`
 
   try {
-    const { data: html } = await axios.get(url, {
+    const { data: html } = await axios.get(`${domain}/jobs?q=${q}&l=${l}`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-        'Referer': domain + '/', 'Cache-Control':'no-cache','Pragma':'no-cache','DNT':'1','Upgrade-Insecure-Requests':'1'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.9', 'DNT': '1'
       }, timeout: 20000
     })
     const $ = cheerio.load(html)
     const found = []
     $('[data-testid="slider_item"]').each(function () {
-      const title = $(this).find('h2 a').text().trim()
-      let link    = $(this).find('h2 a').attr('href') || ''
+      const title    = $(this).find('h2 a').text().trim()
+      const link     = $(this).find('h2 a').attr('href') || ''
       const company  = $(this).find('[data-testid="company-name"]').text().trim()
       const location = $(this).find('[data-testid="text-location"]').text().trim()
       const snippet  = $(this).find('[data-testid="job-snippet"]').text().trim()
@@ -133,51 +109,62 @@ async function fetchIndeedOffers(alert) {
     })
     return found
   } catch (e) {
-    console.warn('⚠️ Bloqueado por Indeed. Se salta para esta alerta.', { url, status: e?.response?.status, msg: e?.message })
+    console.warn('⚠️ Indeed bloqueado:', e?.response?.status, e?.message)
     return []
   }
 }
 
-// ========= Handler =========
+// ─── Handler ──────────────────────────────────────────────────────────────
 export async function GET(request) {
-  // Protección por token
+
+  // ── Autenticación obligatoria ──────────────────────────────────────────
+  // CRON_SECRET es REQUERIDA. Sin ella el endpoint queda bloqueado.
   const cronSecret = process.env.CRON_SECRET
-  if (cronSecret) {
-    const authHeader = request.headers.get('authorization')
-    if (authHeader !== `Bearer ${cronSecret}`) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+  if (!cronSecret) {
+    console.error('[run-scraper] CRON_SECRET no definida. Endpoint bloqueado por seguridad.')
+    return Response.json({ error: 'Endpoint no disponible.' }, { status: 503 })
   }
 
+  const authHeader = request.headers.get('authorization')
+  if (authHeader !== `Bearer ${cronSecret}`) {
+    // Log del intento fallido con IP para detectar abusos
+    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+    console.warn(`[run-scraper] Acceso no autorizado desde IP: ${ip}`)
+    return Response.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  // ── Variables de entorno requeridas ───────────────────────────────────
   const required = ['SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','EMAIL','EMAIL_PASS','ADZUNA_APP_ID','ADZUNA_APP_KEY']
-  const missing = required.filter(k => !process.env[k])
+  const missing  = required.filter(k => !process.env[k])
   if (missing.length) return Response.json({ error: `Faltan variables: ${missing.join(', ')}` }, { status: 500 })
 
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
 
-  // ── Filtro opcional por email (usado en trigger inmediato desde save-alert) ──
+  // ── Filtro opcional por email (trigger inmediato desde save-alert) ─────
   const { searchParams } = new URL(request.url)
   const emailFilter = searchParams.get('email')?.toLowerCase().trim() || null
 
-  // 1) Cargar alertas
-  let alertsQuery = supabase.from('alerts').select('*')
   if (emailFilter) {
-    alertsQuery = alertsQuery.eq('email', emailFilter)
-    console.log(`[run-scraper] Modo trigger inmediato para: ${emailFilter}`)
+    console.log(`[run-scraper] Trigger inmediato para: ${emailFilter}`)
   } else {
     console.log('[run-scraper] Modo cron — procesando todas las alertas')
   }
 
-  const { data: alerts, error: alertsError } = await alertsQuery
+  // ── Cargar alertas ────────────────────────────────────────────────────
+  let query = supabase.from('alerts').select('*')
+  if (emailFilter) query = query.eq('email', emailFilter)
+
+  const { data: alerts, error: alertsError } = await query
   if (alertsError) return Response.json({ error: alertsError.message }, { status: 500 })
 
-  // 2) Cargar emails muteados
+  // ── Emails muteados ───────────────────────────────────────────────────
   const { data: mutedRows, error: mutedErr } = await supabase.from('muted_emails').select('email')
   if (mutedErr) return Response.json({ error: mutedErr.message }, { status: 500 })
   const mutedSet = new Set((mutedRows || []).map(r => String(r.email || '').toLowerCase()))
 
-  // 3) Filtrar alertas de emails no muteados
-  const effectiveAlerts = (alerts || []).filter(a => !mutedSet.has(String(a.email || '').toLowerCase()))
+  const effectiveAlerts = (alerts || []).filter(
+    a => !mutedSet.has(String(a.email || '').toLowerCase())
+  )
 
   const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -190,11 +177,10 @@ export async function GET(request) {
   for (const alert of effectiveAlerts) {
     try {
       const [adz, ind] = await Promise.all([fetchAdzunaOffers(alert), fetchIndeedOffers(alert)])
-      console.log(`Adzuna: ${adz.length} | Indeed: ${ind.length} para`, alert.email)
-
-      const mode = (alert.mode || '').toLowerCase()
-      const merged = [...adz, ...ind].filter(j => matchesMode(mode, `${j.title} ${j.snippet} ${j.location}`, null))
-      console.log(`Tras filtro de modalidad (${mode}) quedan ${merged.length}`)
+      const mode   = (alert.mode || '').toLowerCase()
+      const merged = [...adz, ...ind].filter(j =>
+        matchesMode(mode, `${j.title} ${j.snippet} ${j.location}`)
+      )
 
       for (const job of merged) {
         if (!job?.link) continue
@@ -212,7 +198,6 @@ export async function GET(request) {
         const { error: insErr } = await supabase
           .from('jobs-sent')
           .insert([{ job_id: job.link, sent_to: alert.email }])
-
         if (insErr) console.error('insert jobs-sent error', insErr.message)
         else totalNew++
       }
@@ -221,43 +206,26 @@ export async function GET(request) {
     }
   }
 
-  // 4) Enviar correos
+  // ── Enviar correos ────────────────────────────────────────────────────
   for (const [email, jobs] of Object.entries(resultsByUser)) {
     if (!jobs?.length) continue
+    const chunks = (!isFinite(CHUNK_SIZE) || CHUNK_SIZE <= 0)
+      ? [jobs]
+      : Array.from({ length: Math.ceil(jobs.length / CHUNK_SIZE) }, (_, i) => jobs.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE))
 
-    if (!isFinite(CHUNK_SIZE) || CHUNK_SIZE <= 0) {
-      const lines = jobs.map(j => `• ${j.title} — ${j.company || ''} (${j.location || ''})\n  ${j.link}`).join('\n\n')
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]
+      const lines = chunk.map(j => `• ${j.title} — ${j.company || ''} (${j.location || ''})\n  ${j.link}`).join('\n\n')
+      const subject = chunks.length > 1
+        ? `Nuevas ofertas (${chunk.length}/${jobs.length}) [parte ${i + 1}/${chunks.length}]`
+        : `Nuevas ofertas (${jobs.length}) para tu alerta`
       try {
         await transporter.sendMail({
-          from: process.env.EMAIL,
-          to: email,
-          subject: `Nuevas ofertas (${jobs.length}) para tu alerta`,
-          text: `Hola,\n\nHemos encontrado ${jobs.length} oferta(s) nueva(s) que encajan con tu alerta.\n\n${lines}\n\n— Buscador de Empleo Automatizado`
+          from: `"Alertas de Empleo" <${process.env.EMAIL}>`, to: email, subject,
+          text: `Hola,\n\nHemos encontrado ${jobs.length} oferta(s) nueva(s) que encajan con tu alerta.\n\n${lines}\n\n— Alertas de Empleo`
         })
       } catch (e) { console.error('email error', e.message) }
-    } else {
-      for (let i = 0; i < jobs.length; i += CHUNK_SIZE) {
-        const chunk = jobs.slice(i, i + CHUNK_SIZE)
-        const lines = chunk.map(j => `• ${j.title} — ${j.company || ''} (${j.location || ''})\n  ${j.link}`).join('\n\n')
-        const index = Math.floor(i / CHUNK_SIZE) + 1
-        const totalChunks = Math.ceil(jobs.length / CHUNK_SIZE)
-        try {
-          await transporter.sendMail({
-            from: process.env.EMAIL,
-            to: email,
-            subject: `Nuevas ofertas (${chunk.length}/${jobs.length}) [parte ${index}/${totalChunks}]`,
-            text: `Hola,\n\nHemos encontrado ${jobs.length} oferta(s) nueva(s) que encajan con tu alerta.\n\n${lines}\n\n— Buscador de Empleo Automatizado`
-          })
-        } catch (e) { console.error('email error', e.message) }
-      }
     }
-  }
-
-  if (!Object.keys(resultsByUser).length) {
-    console.log(emailFilter
-      ? `Sin novedades para ${emailFilter}`
-      : 'Sin novedades para ningún usuario'
-    )
   }
 
   return Response.json({ ok: true, alerts: alerts?.length || 0, newSent: totalNew })
