@@ -8,11 +8,10 @@ import nodemailer from 'nodemailer'
 
 // =======================
 // Parámetros opcionales por ENV (límite defensivo)
-// Si NO los defines en Vercel/.env.local, no aplican límites.
 // =======================
-const MAX_PAGES_ENV   = Number(process.env.ADZUNA_MAX_PAGES || 0)              // 0 = sin tope
-const MAX_RESULTS_ENV = Number(process.env.ADZUNA_MAX_RESULTS_PER_ALERT || 0)  // 0 = sin tope
-const CHUNK_SIZE      = Number(process.env.EMAIL_CHUNK_SIZE || 100)            // troceo de emails
+const MAX_PAGES_ENV   = Number(process.env.ADZUNA_MAX_PAGES || 0)
+const MAX_RESULTS_ENV = Number(process.env.ADZUNA_MAX_RESULTS_PER_ALERT || 0)
+const CHUNK_SIZE      = Number(process.env.EMAIL_CHUNK_SIZE || 100)
 
 // ========= Utilidades =========
 const CITY_FIX = {
@@ -26,7 +25,6 @@ const CITY_FIX = {
 
 function cleanCity(rawCity = '', rawCountry = '') {
   let s = String(rawCity || '').toLowerCase().trim()
-  // el país ya va en /jobs/es/, no lo metas en where
   s = s.replace(/\s+españa\b/g, '').replace(/\s+spain\b/g, '')
   if (CITY_FIX[s]) s = CITY_FIX[s]
   s = s.replace(/\s{2,}/g, ' ').trim()
@@ -56,27 +54,19 @@ const matchesMode = (mode, jobText, apiTeleworking) => {
   return true
 }
 
-// ========= Adzuna (ES): paginar hasta el final =========
+// ========= Adzuna =========
 async function fetchAdzunaOffers(alert) {
   const WHAT  = encodeURIComponent(String(alert.job_title || '').trim())
   const CITY  = cleanCity(alert.city, alert.country)
-  const WHERE = encodeURIComponent(CITY)         // solo ciudad
+  const WHERE = encodeURIComponent(CITY)
   const base  = `https://api.adzuna.com/v1/api/jobs/es/search`
 
   const all = []
   let page = 1
 
   while (true) {
-    // Límite defensivo opcional de páginas
-    if (MAX_PAGES_ENV > 0 && page > MAX_PAGES_ENV) {
-      console.warn(`[Adzuna] Parado por ADZUNA_MAX_PAGES=${MAX_PAGES_ENV}`)
-      break
-    }
-    // Límite defensivo opcional de resultados
-    if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) {
-      console.warn(`[Adzuna] Parado por ADZUNA_MAX_RESULTS_PER_ALERT=${MAX_RESULTS_ENV}`)
-      break
-    }
+    if (MAX_PAGES_ENV > 0 && page > MAX_PAGES_ENV) { console.warn(`[Adzuna] Parado por ADZUNA_MAX_PAGES=${MAX_PAGES_ENV}`); break }
+    if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) { console.warn(`[Adzuna] Parado por ADZUNA_MAX_RESULTS_PER_ALERT=${MAX_RESULTS_ENV}`); break }
 
     const params = new URLSearchParams({
       app_id:  process.env.ADZUNA_APP_ID,
@@ -89,14 +79,10 @@ async function fetchAdzunaOffers(alert) {
     const url = `${base}/${page}?${params.toString()}`
 
     try {
-      const { data } = await axios.get(url, {
-        headers: { 'Accept': 'application/json' },
-        timeout: 20000
-      })
+      const { data } = await axios.get(url, { headers: { 'Accept': 'application/json' }, timeout: 20000 })
       const results = data?.results || []
       console.log(`[Adzuna] page=${page} what="${decodeURIComponent(WHAT)}" where="${decodeURIComponent(WHERE)}" -> ${results.length} resultados`)
-
-      if (results.length === 0) break  // FIN NATURAL (no hay más)
+      if (results.length === 0) break
 
       const batch = results.map(r => ({
         title:    r?.title || '',
@@ -107,12 +93,7 @@ async function fetchAdzunaOffers(alert) {
       }))
       all.push(...batch)
 
-      // Límite defensivo por resultados tras añadir la tanda
-      if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) {
-        console.warn(`[Adzuna] Parado por ADZUNA_MAX_RESULTS_PER_ALERT tras añadir page=${page}`)
-        break
-      }
-
+      if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) { console.warn(`[Adzuna] Parado tras page=${page}`); break }
       page += 1
     } catch (e) {
       console.warn('[Adzuna] error', { url, status: e?.response?.status, msg: e?.message })
@@ -123,7 +104,7 @@ async function fetchAdzunaOffers(alert) {
   return all
 }
 
-// ========= Indeed (secundario, tolera 403) =========
+// ========= Indeed =========
 async function fetchIndeedOffers(alert) {
   const q = encodeURIComponent(String(alert.job_title || '').trim())
   const cityOnly = cleanCity(alert.city, alert.country)
@@ -152,14 +133,14 @@ async function fetchIndeedOffers(alert) {
     })
     return found
   } catch (e) {
-    console.warn('⚠️ Bloqueado por Indeed / error HTTP. Se salta Indeed para esta alerta.', { url, status: e?.response?.status, msg: e?.message })
+    console.warn('⚠️ Bloqueado por Indeed. Se salta para esta alerta.', { url, status: e?.response?.status, msg: e?.message })
     return []
   }
 }
 
 // ========= Handler =========
 export async function GET(request) {
-  // Protección por token: se requiere header Authorization: Bearer <CRON_SECRET>
+  // Protección por token
   const cronSecret = process.env.CRON_SECRET
   if (cronSecret) {
     const authHeader = request.headers.get('authorization')
@@ -174,27 +155,42 @@ export async function GET(request) {
 
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
 
+  // ── Filtro opcional por email (usado en trigger inmediato desde save-alert) ──
+  const { searchParams } = new URL(request.url)
+  const emailFilter = searchParams.get('email')?.toLowerCase().trim() || null
+
   // 1) Cargar alertas
-  const { data: alerts, error: alertsError } = await supabase.from('alerts').select('*')
+  let alertsQuery = supabase.from('alerts').select('*')
+  if (emailFilter) {
+    alertsQuery = alertsQuery.eq('email', emailFilter)
+    console.log(`[run-scraper] Modo trigger inmediato para: ${emailFilter}`)
+  } else {
+    console.log('[run-scraper] Modo cron — procesando todas las alertas')
+  }
+
+  const { data: alerts, error: alertsError } = await alertsQuery
   if (alertsError) return Response.json({ error: alertsError.message }, { status: 500 })
 
-  // 2) Cargar emails muteados y construir Set para filtrarlos
+  // 2) Cargar emails muteados
   const { data: mutedRows, error: mutedErr } = await supabase.from('muted_emails').select('email')
   if (mutedErr) return Response.json({ error: mutedErr.message }, { status: 500 })
   const mutedSet = new Set((mutedRows || []).map(r => String(r.email || '').toLowerCase()))
 
-  // 3) Filtrar alertas por emails NO muteados
+  // 3) Filtrar alertas de emails no muteados
   const effectiveAlerts = (alerts || []).filter(a => !mutedSet.has(String(a.email || '').toLowerCase()))
 
-  const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL, pass: process.env.EMAIL_PASS } })
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: process.env.EMAIL, pass: process.env.EMAIL_PASS }
+  })
 
   let totalNew = 0
   const resultsByUser = {}
 
   for (const alert of effectiveAlerts) {
     try {
-      const [adz, ind] = await Promise.all([ fetchAdzunaOffers(alert), fetchIndeedOffers(alert) ])
-      console.log(`Adzuna devolvió ${adz.length} | Indeed devolvió ${ind.length} para`, alert)
+      const [adz, ind] = await Promise.all([fetchAdzunaOffers(alert), fetchIndeedOffers(alert)])
+      console.log(`Adzuna: ${adz.length} | Indeed: ${ind.length} para`, alert.email)
 
       const mode = (alert.mode || '').toLowerCase()
       const merged = [...adz, ...ind].filter(j => matchesMode(mode, `${j.title} ${j.snippet} ${j.location}`, null))
@@ -203,9 +199,8 @@ export async function GET(request) {
       for (const job of merged) {
         if (!job?.link) continue
 
-        // DEDUPE por (job_id, sent_to)
         const { data: already, error: alreadyErr } = await supabase
-          .from('jobs-sent')  // o jobs_sent si renombraste
+          .from('jobs-sent')
           .select('job_id').eq('job_id', job.link).eq('sent_to', alert.email).maybeSingle()
 
         if (alreadyErr) { console.error('supabase check error', alreadyErr.message); continue }
@@ -215,18 +210,18 @@ export async function GET(request) {
         resultsByUser[alert.email].push(job)
 
         const { error: insErr } = await supabase
-          .from('jobs-sent')  // o jobs_sent
+          .from('jobs-sent')
           .insert([{ job_id: job.link, sent_to: alert.email }])
 
         if (insErr) console.error('insert jobs-sent error', insErr.message)
         else totalNew++
       }
     } catch (e) {
-      console.error('Error procesando una alerta:', e?.message)
+      console.error('Error procesando alerta:', e?.message)
     }
   }
 
-  // 4) Enviar correos (troceo si hay muchos)
+  // 4) Enviar correos
   for (const [email, jobs] of Object.entries(resultsByUser)) {
     if (!jobs?.length) continue
 
@@ -258,7 +253,12 @@ export async function GET(request) {
     }
   }
 
-  if (!Object.keys(resultsByUser).length) console.log('No hay novedades para enviar (dedupe/filtrado dejó 0)')
+  if (!Object.keys(resultsByUser).length) {
+    console.log(emailFilter
+      ? `Sin novedades para ${emailFilter}`
+      : 'Sin novedades para ningún usuario'
+    )
+  }
+
   return Response.json({ ok: true, alerts: alerts?.length || 0, newSent: totalNew })
 }
-
