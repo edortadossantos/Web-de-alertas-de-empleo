@@ -4,5 +4,13 @@
       "path": "/api/run-scraper",
       "schedule": "0 9 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "app/api/save-alert/route.js": {
+      "maxDuration": 60
+    },
+    "app/api/run-scraper/route.js": {
+      "maxDuration": 60
+    }
+  }
 }
