@@ -18,10 +18,11 @@ function cleanLocation(raw = '') {
 const normalizeIndeed = (job, domain) => {
   let link = job.link || ''
   if (link && !link.startsWith('http')) link = domain + link
-  return { title: job.title || '', link, company: job.company || '', location: job.location || '', snippet: job.snippet || '', salary_min: null, salary_max: null }
+  return { title: job.title || '', link, company: job.company || '', location: job.location || '', snippet: job.snippet || '', salary_min: null, salary_max: null, source: 'Indeed' }
 }
 
 const STOPWORDS = new Set(['de','la','el','en','y','a','con','para','por','del','los','las','un','una','al'])
+
 
 function isRelevant(jobTitle, searchedTitle) {
   const normalize = str => str
@@ -53,7 +54,9 @@ function matchesMode(modes, jobText) {
 }
 
 // ─── Template HTML ────────────────────────────────────────────────────────
-function buildEmailHtml(jobs, totalJobs) {
+const SOURCE_COLORS = { Adzuna: '#0070f3', Indeed: '#2557a7', InfoJobs: '#167db7', Tecnoempleo: '#e8650a', Computrabajo: '#00a550' }
+
+function buildEmailHtml(jobs, totalJobs, email = '') {
   const jobCards = jobs.map(j => {
     const salary = (j.salary_min || j.salary_max)
       ? `<div style="margin-top:6px;">
@@ -64,9 +67,13 @@ function buildEmailHtml(jobs, totalJobs) {
       : ''
     const company  = j.company  ? `<div style="color:#666;font-size:13px;margin-top:4px;">🏢 ${j.company}</div>`  : ''
     const location = j.location ? `<div style="color:#666;font-size:13px;margin-top:2px;">📍 ${j.location}</div>` : ''
-
+    const srcColor = SOURCE_COLORS[j.source] || '#888'
+    const sourceBadge = j.source
+      ? `<span style="float:right;display:inline-block;background:${srcColor}18;color:${srcColor};padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;margin-left:8px;">${j.source}</span>`
+      : ''
     return `
       <div style="background:#fff;border:1px solid #e8e8f0;border-radius:12px;padding:20px;margin-bottom:12px;">
+        <div style="overflow:hidden;margin-bottom:4px;">${sourceBadge}</div>
         <div style="font-size:16px;font-weight:700;color:#1a1a2e;line-height:1.3;">${j.title}</div>
         ${company}${location}${salary}
         <div style="margin-top:14px;">
@@ -78,7 +85,8 @@ function buildEmailHtml(jobs, totalJobs) {
       </div>`
   }).join('')
 
-  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://web-de-alertas-de-empleo.vercel.app'
+  const baseUrl   = process.env.NEXT_PUBLIC_BASE_URL || 'https://web-de-alertas-de-empleo.vercel.app'
+  const manageUrl = email ? `${baseUrl}?email=${encodeURIComponent(email)}` : baseUrl
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -100,7 +108,7 @@ function buildEmailHtml(jobs, totalJobs) {
         <tr><td style="background:#fff;border:1px solid #e8e8f0;border-radius:12px;padding:20px;text-align:center;">
           <div style="color:#999;font-size:12px;line-height:1.6;">
             Recibes este email porque tienes una alerta activa en <strong>Alertas de Empleo</strong>.<br>
-            ¿Ya no quieres recibirlos? <a href="${baseUrl}" style="color:#6c63ff;text-decoration:none;">Gestiona tus alertas aquí</a>.
+            ¿Ya no quieres recibirlos? <a href="${manageUrl}" style="color:#6c63ff;text-decoration:none;">Gestiona tus alertas aquí</a>.
           </div>
         </td></tr>
 
@@ -156,7 +164,8 @@ async function fetchAdzunaOffers(alert) {
         location:   r?.location?.display_name || '',
         snippet:    (r?.description || '').slice(0, 300),
         salary_min: r?.salary_min || null,
-        salary_max: r?.salary_max || null
+        salary_max: r?.salary_max || null,
+        source:     'Adzuna'
       })))
 
       if (MAX_RESULTS_ENV > 0 && all.length >= MAX_RESULTS_ENV) break
@@ -196,6 +205,112 @@ async function fetchIndeedOffers(alert) {
     return found
   } catch (e) {
     console.warn('⚠️ Indeed bloqueado:', e?.response?.status)
+    return []
+  }
+}
+
+// ─── InfoJobs (API oficial — requiere INFOJOBS_CLIENT_ID + INFOJOBS_CLIENT_SECRET) ──
+async function fetchInfoJobsOffers(alert) {
+  const clientId     = process.env.INFOJOBS_CLIENT_ID
+  const clientSecret = process.env.INFOJOBS_CLIENT_SECRET
+  if (!clientId || !clientSecret) return []
+
+  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+  const params = {
+    q:              String(alert.job_title || '').trim(),
+    city:           cleanLocation(alert.city),
+    country:        'es',
+    page:           1,
+    resultsPerPage: 20,
+  }
+  if (alert.salary_min) params.salaryMin = alert.salary_min
+
+  try {
+    const { data } = await axios.get('https://api.infojobs.net/api/7/offer', {
+      headers: { Authorization: `Basic ${credentials}`, Accept: 'application/json' },
+      params,
+      timeout: 20000
+    })
+    console.log(`[InfoJobs] ${data?.items?.length || 0} resultados para "${alert.job_title}"`)
+    return (data?.items || []).map(r => ({
+      title:      r.title        || '',
+      link:       r.link         || 'https://www.infojobs.net',
+      company:    r.author?.name || '',
+      location:   r.province?.value || r.city || cleanLocation(alert.city),
+      snippet:    (r.description || '').slice(0, 300),
+      salary_min: r.minPay?.amount || null,
+      salary_max: r.maxPay?.amount || null,
+      source:     'InfoJobs'
+    }))
+  } catch (e) {
+    console.warn('[InfoJobs] error', e?.response?.status, e?.message)
+    return []
+  }
+}
+
+// ─── Tecnoempleo (scraping) ────────────────────────────────────────────────
+async function fetchTecnoempleoOffers(alert) {
+  const q      = encodeURIComponent(String(alert.job_title || '').trim())
+  const l      = encodeURIComponent(cleanLocation(alert.city))
+  const domain = 'https://www.tecnoempleo.com'
+
+  try {
+    const { data: html } = await axios.get(`${domain}/busqueda-empleo.php?te=${q}&pr=${l}`, {
+      headers: {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.9'
+      }, timeout: 20000
+    })
+    const $ = cheerio.load(html)
+    const found = []
+    // Selector principal de ofertas en Tecnoempleo
+    $('div.col-10.col-md-9, div.oferta, article').each(function () {
+      const titleEl  = $(this).find('a[href*="/oferta-trabajo/"], h2 a, h3 a').first()
+      const title    = titleEl.text().trim()
+      let link       = titleEl.attr('href') || ''
+      if (link && !link.startsWith('http')) link = domain + link
+      const company  = $(this).find('.empresa, .company, [class*="empresa"]').first().text().trim()
+      const location = $(this).find('.poblacion, .location, [class*="location"]').first().text().trim()
+      if (title && link) found.push({ title, link, company, location, snippet: '', salary_min: null, salary_max: null, source: 'Tecnoempleo' })
+    })
+    console.log(`[Tecnoempleo] ${found.length} resultados para "${alert.job_title}"`)
+    return found
+  } catch (e) {
+    console.warn('⚠️ Tecnoempleo error:', e?.response?.status)
+    return []
+  }
+}
+
+// ─── Computrabajo (scraping) ───────────────────────────────────────────────
+async function fetchComputrabajoOffers(alert) {
+  const q      = encodeURIComponent(String(alert.job_title || '').trim())
+  const l      = encodeURIComponent(cleanLocation(alert.city))
+  const domain = 'https://www.computrabajo.es'
+
+  try {
+    const { data: html } = await axios.get(`${domain}/ofertas-de-trabajo/?q=${q}&l=${l}`, {
+      headers: {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.9'
+      }, timeout: 20000
+    })
+    const $ = cheerio.load(html)
+    const found = []
+    $('article[data-id], .box_offer, article').each(function () {
+      const titleEl  = $(this).find('a[href*="/empleo/"], h2 a, .title_offer a').first()
+      const title    = titleEl.text().trim()
+      let link       = titleEl.attr('href') || ''
+      if (link && !link.startsWith('http')) link = domain + link
+      const company  = $(this).find('.fc_base.t_ellipsis, .nameEmpresa, [class*="company"]').first().text().trim()
+      const location = $(this).find('span[title], .fc_base:not(.t_ellipsis)').first().text().trim()
+      if (title && link) found.push({ title, link, company, location, snippet: '', salary_min: null, salary_max: null, source: 'Computrabajo' })
+    })
+    console.log(`[Computrabajo] ${found.length} resultados para "${alert.job_title}"`)
+    return found
+  } catch (e) {
+    console.warn('⚠️ Computrabajo error:', e?.response?.status)
     return []
   }
 }
@@ -246,10 +361,16 @@ export async function GET(request) {
 
   for (const alert of effectiveAlerts) {
     try {
-      const [adz, ind] = await Promise.all([fetchAdzunaOffers(alert), fetchIndeedOffers(alert)])
-      console.log(`Adzuna: ${adz.length} | Indeed: ${ind.length} para ${alert.email}`)
+      const [adz, ind, ij, tec, ctr] = await Promise.all([
+        fetchAdzunaOffers(alert),
+        fetchIndeedOffers(alert),
+        fetchInfoJobsOffers(alert),
+        fetchTecnoempleoOffers(alert),
+        fetchComputrabajoOffers(alert)
+      ])
+      console.log(`Adzuna:${adz.length} Indeed:${ind.length} InfoJobs:${ij.length} Tecnoempleo:${tec.length} Computrabajo:${ctr.length} → ${alert.email}`)
 
-      const merged = [...adz, ...ind].filter(j => {
+      const merged = [...adz, ...ind, ...ij, ...tec, ...ctr].filter(j => {
         if (!isRelevant(j.title, alert.job_title)) return false
         if (!matchesMode(alert.mode, `${j.title} ${j.snippet} ${j.location}`)) return false
         return true
@@ -280,6 +401,18 @@ export async function GET(request) {
     }
   }
 
+  // ── Purgar jobs-sent > 90 días (solo en modo cron) ───────────────────
+  if (!emailFilter) {
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - 90)
+    const { error: purgeErr } = await supabase
+      .from('jobs-sent')
+      .delete()
+      .lt('created_at', cutoff.toISOString())
+    if (purgeErr) console.warn('[purge] Error limpiando jobs-sent:', purgeErr.message)
+    else console.log('[purge] Registros de jobs-sent anteriores a 90 días eliminados')
+  }
+
   // ── Enviar correos ────────────────────────────────────────────────────
   for (const [email, jobs] of Object.entries(resultsByUser)) {
     if (!jobs?.length) continue
@@ -300,7 +433,7 @@ export async function GET(request) {
           from: `"Alertas de Empleo" <${process.env.EMAIL}>`,
           to: email,
           subject,
-          html: buildEmailHtml(chunk, jobs.length),
+          html: buildEmailHtml(chunk, jobs.length, email),
           text: buildEmailText(chunk)
         })
         console.log(`[email] Enviado a ${email} con ${chunk.length} ofertas`)
